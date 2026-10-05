@@ -28,7 +28,6 @@ jobs:
         run: |
           set -e
 
-          # ---------- root files ----------
           cat > settings.gradle <<'EOF'
           pluginManagement {
               repositories {
@@ -62,7 +61,6 @@ jobs:
           android.nonTransitiveRClass=true
           EOF
 
-          # ---------- app module ----------
           mkdir -p app/src/main/java/com/example/backgroundcamera
           mkdir -p app/src/main/res/layout
           mkdir -p app/src/main/res/values
@@ -113,7 +111,6 @@ jobs:
           }
           EOF
 
-          # ---------- AndroidManifest ----------
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -151,7 +148,6 @@ jobs:
           </manifest>
           EOF
 
-          # ---------- MainActivity.kt ----------
           cat > app/src/main/java/com/example/backgroundcamera/MainActivity.kt <<'EOF'
           package com.example.backgroundcamera
 
@@ -225,7 +221,6 @@ jobs:
           }
           EOF
 
-          # ---------- RecordingService.kt ----------
           cat > app/src/main/java/com/example/backgroundcamera/RecordingService.kt <<'EOF'
           package com.example.backgroundcamera
 
@@ -312,7 +307,7 @@ jobs:
                       try {
                           cameraProvider = future.get()
                           val recorder = Recorder.Builder()
-                              .setQualitySelector(QualitySelector.from(Quality.HIGH))
+                              .setQualitySelector(QualitySelector.from(Quality.FHD))
                               .build()
                           videoCapture = VideoCapture.withOutput(recorder)
                           cameraProvider?.unbindAll()
@@ -402,7 +397,6 @@ jobs:
           }
           EOF
 
-          # ---------- layouts ----------
           cat > app/src/main/res/layout/activity_main.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
@@ -427,7 +421,6 @@ jobs:
           </LinearLayout>
           EOF
 
-          # ---------- values ----------
           cat > app/src/main/res/values/strings.xml <<'EOF'
           <resources>
               <string name="app_name">Background Camera</string>
@@ -450,7 +443,6 @@ jobs:
           </resources>
           EOF
 
-          # ---------- icons ----------
           cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'EOF'
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp" android:height="108dp"
