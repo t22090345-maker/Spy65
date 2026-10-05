@@ -1,0 +1,518 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Create project files
+        run: |
+          set -e
+
+          # ---------- root files ----------
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "BackgroundCamera"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF
+
+          # ---------- app module ----------
+          mkdir -p app/src/main/java/com/example/backgroundcamera
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          mkdir -p app/src/main/res/mipmap
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'com.example.backgroundcamera'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.example.backgroundcamera"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release { minifyEnabled false }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+          }
+
+          dependencies {
+              def camerax_version = "1.3.4"
+              implementation "androidx.camera:camera-core:${camerax_version}"
+              implementation "androidx.camera:camera-camera2:${camerax_version}"
+              implementation "androidx.camera:camera-lifecycle:${camerax_version}"
+              implementation "androidx.camera:camera-video:${camerax_version}"
+              implementation 'androidx.core:core-ktx:1.13.1'
+              implementation 'androidx.appcompat:appcompat:1.7.0'
+              implementation 'com.google.android.material:material:1.12.0'
+              implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+              implementation 'androidx.lifecycle:lifecycle-service:2.8.4'
+          }
+          EOF
+
+          # ---------- AndroidManifest ----------
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher_round"
+                  android:label="@string/app_name"
+                  android:theme="@style/Theme.BackgroundCamera">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".RecordingService"
+                      android:enabled="true"
+                      android:exported="false"
+                      android:foregroundServiceType="camera|microphone" />
+              </application>
+          </manifest>
+          EOF
+
+          # ---------- MainActivity.kt ----------
+          cat > app/src/main/java/com/example/backgroundcamera/MainActivity.kt <<'EOF'
+          package com.example.backgroundcamera
+
+          import android.Manifest
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.widget.Button
+          import android.widget.Toast
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.content.ContextCompat
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var btnStart: Button
+              private lateinit var btnStop: Button
+
+              private val requiredPermissions = mutableListOf(
+                  Manifest.permission.CAMERA,
+                  Manifest.permission.RECORD_AUDIO
+              ).apply {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      add(Manifest.permission.POST_NOTIFICATIONS)
+                  }
+              }.toTypedArray()
+
+              private val permissionLauncher = registerForActivityResult(
+                  ActivityResultContracts.RequestMultiplePermissions()
+              ) { result ->
+                  if (result.values.all { it }) startRecordingService()
+                  else Toast.makeText(this, "Saare permissions chahiye", Toast.LENGTH_LONG).show()
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+
+                  btnStart = findViewById(R.id.btnStart)
+                  btnStop = findViewById(R.id.btnStop)
+
+                  btnStart.setOnClickListener {
+                      if (hasAllPermissions()) startRecordingService()
+                      else permissionLauncher.launch(requiredPermissions)
+                  }
+
+                  btnStop.setOnClickListener { stopRecordingService() }
+              }
+
+              private fun hasAllPermissions(): Boolean =
+                  requiredPermissions.all {
+                      ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+                  }
+
+              private fun startRecordingService() {
+                  val intent = Intent(this, RecordingService::class.java).apply {
+                      action = RecordingService.ACTION_START
+                  }
+                  ContextCompat.startForegroundService(this, intent)
+                  Toast.makeText(this, "Recording start ho gayi", Toast.LENGTH_SHORT).show()
+              }
+
+              private fun stopRecordingService() {
+                  val intent = Intent(this, RecordingService::class.java).apply {
+                      action = RecordingService.ACTION_STOP
+                  }
+                  startService(intent)
+                  Toast.makeText(this, "Recording band. Video save ho gayi.", Toast.LENGTH_SHORT).show()
+              }
+          }
+          EOF
+
+          # ---------- RecordingService.kt ----------
+          cat > app/src/main/java/com/example/backgroundcamera/RecordingService.kt <<'EOF'
+          package com.example.backgroundcamera
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.os.Build
+          import android.os.Environment
+          import android.os.PowerManager
+          import android.util.Log
+          import androidx.camera.core.CameraSelector
+          import androidx.camera.lifecycle.ProcessCameraProvider
+          import androidx.camera.video.FileOutputOptions
+          import androidx.camera.video.Quality
+          import androidx.camera.video.QualitySelector
+          import androidx.camera.video.Recorder
+          import androidx.camera.video.Recording
+          import androidx.camera.video.VideoCapture
+          import androidx.camera.video.VideoRecordEvent
+          import androidx.core.app.NotificationCompat
+          import androidx.core.content.ContextCompat
+          import androidx.lifecycle.LifecycleService
+          import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.Locale
+
+          class RecordingService : LifecycleService() {
+
+              companion object {
+                  const val ACTION_START = "ACTION_START"
+                  const val ACTION_STOP  = "ACTION_STOP"
+                  private const val TAG = "RecordingService"
+                  private const val CHANNEL_ID = "recording_channel"
+                  private const val NOTIFICATION_ID = 101
+              }
+
+              private var cameraProvider: ProcessCameraProvider? = null
+              private var videoCapture: VideoCapture<Recorder>? = null
+              private var activeRecording: Recording? = null
+              private lateinit var wakeLock: PowerManager.WakeLock
+
+              override fun onCreate() {
+                  super.onCreate()
+                  createNotificationChannel()
+                  val pm = getSystemService(POWER_SERVICE) as PowerManager
+                  wakeLock = pm.newWakeLock(
+                      PowerManager.PARTIAL_WAKE_LOCK,
+                      "BackgroundCamera::WakeLock"
+                  ).apply { setReferenceCounted(false) }
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  super.onStartCommand(intent, flags, startId)
+                  when (intent?.action) {
+                      ACTION_START, null -> startRecording()
+                      ACTION_STOP -> stopRecordingAndService()
+                  }
+                  return START_STICKY
+              }
+
+              private fun startRecording() {
+                  val notification = buildNotification()
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      startForeground(
+                          NOTIFICATION_ID,
+                          notification,
+                          ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+                                  ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                      )
+                  } else {
+                      startForeground(NOTIFICATION_ID, notification)
+                  }
+
+                  if (!wakeLock.isHeld) wakeLock.acquire()
+                  initCameraAndRecord()
+              }
+
+              private fun initCameraAndRecord() {
+                  val future = ProcessCameraProvider.getInstance(this)
+                  future.addListener({
+                      try {
+                          cameraProvider = future.get()
+                          val recorder = Recorder.Builder()
+                              .setQualitySelector(QualitySelector.from(Quality.HIGH))
+                              .build()
+                          videoCapture = VideoCapture.withOutput(recorder)
+                          cameraProvider?.unbindAll()
+                          cameraProvider?.bindToLifecycle(
+                              this,
+                              CameraSelector.DEFAULT_BACK_CAMERA,
+                              videoCapture
+                          )
+                          beginVideoFileRecording()
+                      } catch (e: Exception) {
+                          Log.e(TAG, "Camera init fail", e)
+                          stopRecordingAndService()
+                      }
+                  }, ContextCompat.getMainExecutor(this))
+              }
+
+              private fun beginVideoFileRecording() {
+                  val capture = videoCapture ?: return
+                  val videoDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+                  if (videoDir != null && !videoDir.exists()) videoDir.mkdirs()
+                  val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+                      .format(System.currentTimeMillis())
+                  val videoFile = File(videoDir, "REC_${timeStamp}.mp4")
+                  val outputOptions = FileOutputOptions.Builder(videoFile).build()
+
+                  activeRecording = capture.output
+                      .prepareRecording(this, outputOptions)
+                      .withAudioEnabled()
+                      .start(ContextCompat.getMainExecutor(this)) { event ->
+                          when (event) {
+                              is VideoRecordEvent.Start -> Log.d(TAG, "Recording started")
+                              is VideoRecordEvent.Finalize -> {
+                                  if (event.hasError()) Log.e(TAG, "Error: ${event.error}")
+                                  else Log.d(TAG, "Saved: ${event.outputResults.outputUri}")
+                                  activeRecording = null
+                              }
+                          }
+                      }
+              }
+
+              private fun stopRecordingAndService() {
+                  try { activeRecording?.stop() } catch (_: Exception) {}
+                  activeRecording = null
+                  cameraProvider?.unbindAll()
+                  cameraProvider = null
+                  if (wakeLock.isHeld) wakeLock.release()
+                  stopForeground(STOP_FOREGROUND_REMOVE)
+                  stopSelf()
+              }
+
+              override fun onDestroy() {
+                  try { activeRecording?.stop() } catch (_: Exception) {}
+                  cameraProvider?.unbindAll()
+                  if (wakeLock.isHeld) wakeLock.release()
+                  super.onDestroy()
+              }
+
+              private fun createNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(
+                          CHANNEL_ID,
+                          "Background Recording",
+                          NotificationManager.IMPORTANCE_LOW
+                      )
+                      val manager = getSystemService(NotificationManager::class.java)
+                      manager.createNotificationChannel(channel)
+                  }
+              }
+
+              private fun buildNotification(): Notification {
+                  val stopIntent = Intent(this, RecordingService::class.java).apply {
+                      action = ACTION_STOP
+                  }
+                  val stopPending = PendingIntent.getService(
+                      this, 0, stopIntent,
+                      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                  )
+                  return NotificationCompat.Builder(this, CHANNEL_ID)
+                      .setContentTitle("Recording chal rahi hai")
+                      .setContentText("Video record ho raha hai…")
+                      .setSmallIcon(android.R.drawable.ic_menu_camera)
+                      .addAction(android.R.drawable.ic_media_pause, "Stop", stopPending)
+                      .setOngoing(true)
+                      .setPriority(NotificationCompat.PRIORITY_LOW)
+                      .build()
+              }
+          }
+          EOF
+
+          # ---------- layouts ----------
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:gravity="center"
+              android:padding="24dp">
+
+              <Button
+                  android:id="@+id/btnStart"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="Start Recording" />
+
+              <Button
+                  android:id="@+id/btnStop"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="16dp"
+                  android:text="Stop Recording" />
+          </LinearLayout>
+          EOF
+
+          # ---------- values ----------
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">Background Camera</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values/colors.xml <<'EOF'
+          <resources>
+              <color name="ic_launcher_background">#FF5722</color>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values/themes.xml <<'EOF'
+          <resources>
+              <style name="Theme.BackgroundCamera" parent="Theme.AppCompat.DayNight.NoActionBar">
+                  <item name="colorPrimary">#FF5722</item>
+                  <item name="colorPrimaryDark">#BF360C</item>
+                  <item name="colorAccent">#FF5722</item>
+              </style>
+          </resources>
+          EOF
+
+          # ---------- icons ----------
+          cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <group android:translateX="27" android:translateY="27"
+                  android:scaleX="2.25" android:scaleY="2.25">
+                  <path android:fillColor="#FFFFFF"
+                      android:pathData="M9,2L7.17,4H4a2,2 0 0,0 -2,2v12a2,2 0 0,0 2,2h16a2,2 0 0,0 2,-2V6a2,2 0 0,0 -2,-2h-3.17L15,2H9zM12,17a5,5 0 1,1 0,-10a5,5 0 0,1 0,10z" />
+              </group>
+          </vector>
+          EOF
+
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          EOF
+
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          EOF
+
+          cat > app/src/main/res/mipmap/ic_launcher.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="48dp" android:height="48dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#FF5722" android:pathData="M0,0h108v108h-108z" />
+              <group android:translateX="27" android:translateY="27"
+                  android:scaleX="2.25" android:scaleY="2.25">
+                  <path android:fillColor="#FFFFFF"
+                      android:pathData="M9,2L7.17,4H4a2,2 0 0,0 -2,2v12a2,2 0 0,0 2,2h16a2,2 0 0,0 2,-2V6a2,2 0 0,0 -2,-2h-3.17L15,2H9zM12,17a5,5 0 1,1 0,-10a5,5 0 0,1 0,10z" />
+              </group>
+          </vector>
+          EOF
+
+          cat > app/src/main/res/mipmap/ic_launcher_round.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="48dp" android:height="48dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#FF5722" android:pathData="M0,0h108v108h-108z" />
+              <group android:translateX="27" android:translateY="27"
+                  android:scaleX="2.25" android:scaleY="2.25">
+                  <path android:fillColor="#FFFFFF"
+                      android:pathData="M9,2L7.17,4H4a2,2 0 0,0 -2,2v12a2,2 0 0,0 2,2h16a2,2 0 0,0 2,-2V6a2,2 0 0,0 -2,-2h-3.17L15,2H9zM12,17a5,5 0 1,1 0,-10a5,5 0 0,1 0,10z" />
+              </group>
+          </vector>
+          EOF
+
+          echo "✔ All project files created"
+
+      - name: Build Debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BackgroundCamera-APK
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
