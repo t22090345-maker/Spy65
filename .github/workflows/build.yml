@@ -30,18 +30,11 @@ jobs:
 
           cat > settings.gradle <<'EOF'
           pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
           }
           dependencyResolutionManagement {
               repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
+              repositories { google(); mavenCentral() }
           }
           rootProject.name = "BackgroundCamera"
           include ':app'
@@ -86,11 +79,7 @@ jobs:
                   versionCode 1
                   versionName "1.0"
               }
-
-              buildTypes {
-                  release { minifyEnabled false }
-              }
-
+              buildTypes { release { minifyEnabled false } }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
@@ -123,22 +112,26 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+                  android:maxSdkVersion="28" />
 
               <application
                   android:allowBackup="true"
                   android:icon="@mipmap/ic_launcher"
                   android:roundIcon="@mipmap/ic_launcher_round"
                   android:label="@string/app_name"
+                  android:requestLegacyExternalStorage="true"
                   android:theme="@style/Theme.BackgroundCamera">
 
-                  <activity
-                      android:name=".MainActivity"
-                      android:exported="true">
+                  <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+
+                  <activity android:name=".TrashActivity" android:exported="false" />
+                  <activity android:name=".SettingsActivity" android:exported="false" />
 
                   <service
                       android:name=".RecordingService"
@@ -163,51 +156,64 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <paths xmlns:android="http://schemas.android.com/apk/res/android">
               <external-files-path name="movies" path="Movies/" />
+              <external-files-path name="trash" path="Trash/" />
           </paths>
           EOF
 
+          # ---------------- MainActivity ----------------
           cat > app/src/main/java/com/example/backgroundcamera/MainActivity.kt <<'EOF'
           package com.example.backgroundcamera
 
           import android.Manifest
+          import android.content.ContentValues
           import android.content.Intent
           import android.content.pm.PackageManager
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
           import android.os.Environment
+          import android.provider.MediaStore
           import android.view.Gravity
-          import android.widget.Button
-          import android.widget.LinearLayout
-          import android.widget.TextView
-          import android.widget.Toast
+          import android.view.View
+          import android.widget.*
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.appcompat.app.AppCompatActivity
           import androidx.core.content.ContextCompat
           import androidx.core.content.FileProvider
           import java.io.File
+          import java.text.SimpleDateFormat
+          import java.util.*
 
           class MainActivity : AppCompatActivity() {
 
               private lateinit var btnStart: Button
               private lateinit var btnStop: Button
+              private lateinit var btnTrash: Button
+              private lateinit var btnSettings: Button
               private lateinit var videoListLayout: LinearLayout
+              private lateinit var topBar: LinearLayout
+              private lateinit var tvSelectedCount: TextView
+              private lateinit var btnExport: Button
+              private lateinit var btnDelete: Button
+              private lateinit var btnCancel: Button
+
+              private val selected = mutableSetOf<File>()
+              private var selectionMode = false
+
+              private val permLauncher = registerForActivityResult(
+                  ActivityResultContracts.RequestMultiplePermissions()
+              ) { r ->
+                  if (r.values.all { it }) startRecordingService()
+                  else Toast.makeText(this, "Saare permissions chahiye", Toast.LENGTH_LONG).show()
+              }
 
               private val requiredPermissions = mutableListOf(
                   Manifest.permission.CAMERA,
                   Manifest.permission.RECORD_AUDIO
               ).apply {
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                       add(Manifest.permission.POST_NOTIFICATIONS)
-                  }
               }.toTypedArray()
-
-              private val permissionLauncher = registerForActivityResult(
-                  ActivityResultContracts.RequestMultiplePermissions()
-              ) { result ->
-                  if (result.values.all { it }) startRecordingService()
-                  else Toast.makeText(this, "Saare permissions chahiye", Toast.LENGTH_LONG).show()
-              }
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
@@ -215,14 +221,29 @@ jobs:
 
                   btnStart = findViewById(R.id.btnStart)
                   btnStop = findViewById(R.id.btnStop)
+                  btnTrash = findViewById(R.id.btnTrash)
+                  btnSettings = findViewById(R.id.btnSettings)
                   videoListLayout = findViewById(R.id.videoListLayout)
+                  topBar = findViewById(R.id.topBar)
+                  tvSelectedCount = findViewById(R.id.tvSelectedCount)
+                  btnExport = findViewById(R.id.btnExport)
+                  btnDelete = findViewById(R.id.btnDelete)
+                  btnCancel = findViewById(R.id.btnCancel)
 
                   btnStart.setOnClickListener {
-                      if (hasAllPermissions()) startRecordingService()
-                      else permissionLauncher.launch(requiredPermissions)
+                      if (hasAllPerms()) startRecordingService()
+                      else permLauncher.launch(requiredPermissions)
                   }
-
                   btnStop.setOnClickListener { stopRecordingService() }
+                  btnTrash.setOnClickListener {
+                      startActivity(Intent(this, TrashActivity::class.java))
+                  }
+                  btnSettings.setOnClickListener {
+                      startActivity(Intent(this, SettingsActivity::class.java))
+                  }
+                  btnCancel.setOnClickListener { exitSelectionMode() }
+                  btnExport.setOnClickListener { exportSelected() }
+                  btnDelete.setOnClickListener { deleteSelected() }
               }
 
               override fun onResume() {
@@ -231,68 +252,371 @@ jobs:
               }
 
               private fun loadVideos() {
-                  val videoDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-                  val files = videoDir?.listFiles { file -> file.extension == "mp4" }
-                  
+                  val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+                  val files = dir?.listFiles { f -> f.extension == "mp4" }
+                      ?.sortedByDescending { it.lastModified() }
+
                   videoListLayout.removeAllViews()
-                  
-                  if (files != null && files.isNotEmpty()) {
-                      for (file in files) {
-                          val button = Button(this)
-                          button.text = file.name
-                          button.setOnClickListener { playVideo(file) }
-                          videoListLayout.addView(button)
+                  selected.clear()
+                  exitSelectionMode()
+
+                  if (files.isNullOrEmpty()) {
+                      val tv = TextView(this).apply {
+                          text = "Abhi tak koi video record nahi hui."
+                          gravity = Gravity.CENTER
+                          setPadding(0, 48, 0, 48)
                       }
-                  } else {
-                      val textView = TextView(this)
-                      textView.text = "Abhi tak koi video record nahi hui."
-                      textView.gravity = Gravity.CENTER
-                      textView.setPadding(0, 32, 0, 32)
-                      videoListLayout.addView(textView)
+                      videoListLayout.addView(tv)
+                      return
                   }
+
+                  for (file in files) videoListLayout.addView(makeVideoRow(file))
+              }
+
+              private fun makeVideoRow(file: File): View {
+                  val row = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setPadding(16, 16, 16, 16)
+                      layoutParams = LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT
+                      )
+                  }
+                  val cb = CheckBox(this).apply {
+                      visibility = if (selectionMode) View.VISIBLE else View.GONE
+                      isChecked = selected.contains(file)
+                      setOnCheckedChangeListener { _, isChecked ->
+                          if (isChecked) selected.add(file) else selected.remove(file)
+                          updateTopBar()
+                      }
+                  }
+                  val tv = TextView(this).apply {
+                      text = prettyName(file)
+                      textSize = 15f
+                      setPadding(24, 8, 8, 8)
+                      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  }
+                  row.addView(cb)
+                  row.addView(tv)
+                  row.setOnClickListener {
+                      if (selectionMode) {
+                          cb.isChecked = !cb.isChecked
+                      } else {
+                          playVideo(file)
+                      }
+                  }
+                  row.setOnLongClickListener {
+                      if (!selectionMode) {
+                          selectionMode = true
+                          cb.visibility = View.VISIBLE
+                          cb.isChecked = true
+                          selected.add(file)
+                          updateTopBar()
+                          refreshVisibility()
+                      }
+                      true
+                  }
+                  return row
+              }
+
+              private fun refreshVisibility() {
+                  for (i in 0 until videoListLayout.childCount) {
+                      val row = videoListLayout.getChildAt(i) as? LinearLayout ?: continue
+                      val cb = row.getChildAt(0) as? CheckBox ?: continue
+                      cb.visibility = if (selectionMode) View.VISIBLE else View.GONE
+                  }
+              }
+
+              private fun updateTopBar() {
+                  if (selectionMode && selected.isNotEmpty()) {
+                      topBar.visibility = View.VISIBLE
+                      tvSelectedCount.text = "${selected.size} selected"
+                  } else if (selectionMode) {
+                      topBar.visibility = View.VISIBLE
+                      tvSelectedCount.text = "0 selected"
+                  } else {
+                      topBar.visibility = View.GONE
+                  }
+              }
+
+              private fun exitSelectionMode() {
+                  selectionMode = false
+                  selected.clear()
+                  topBar.visibility = View.GONE
+                  refreshVisibility()
+                  for (i in 0 until videoListLayout.childCount) {
+                      val row = videoListLayout.getChildAt(i) as? LinearLayout ?: continue
+                      (row.getChildAt(0) as? CheckBox)?.isChecked = false
+                  }
+              }
+
+              private fun prettyName(file: File): String {
+                  // REC_yyyyMMdd_HHmmss.mp4 -> "05 Oct 2026, 09:13 AM"
+                  val m = Regex("REC_(\\d{8})_(\\d{6})").find(file.nameWithoutExtension)
+                  if (m != null) {
+                      val d = m.groupValues[1]
+                      val t = m.groupValues[2]
+                      val fmtIn = SimpleDateFormat("yyyyMMddHHmmss", Locale.US)
+                      val fmtOut = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.US)
+                      try {
+                          val date = fmtIn.parse(d + t)
+                          if (date != null) return fmtOut.format(date)
+                      } catch (_: Exception) {}
+                  }
+                  return file.name
               }
 
               private fun playVideo(file: File) {
                   val uri: Uri = FileProvider.getUriForFile(
-                      this,
-                      "com.example.backgroundcamera.fileprovider",
-                      file
+                      this, "com.example.backgroundcamera.fileprovider", file
                   )
                   val intent = Intent(Intent.ACTION_VIEW).apply {
                       setDataAndType(uri, "video/mp4")
                       addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                   }
-                  try {
-                      startActivity(intent)
+                  try { startActivity(intent) }
+                  catch (_: Exception) { Toast.makeText(this, "Koi video player nahi mila", Toast.LENGTH_SHORT).show() }
+              }
+
+              // --------- Selection actions ---------
+
+              private fun deleteSelected() {
+                  if (selected.isEmpty()) return
+                  val trashDir = File(getExternalFilesDir(null), "Trash").apply { mkdirs() }
+                  var count = 0
+                  for (f in selected) {
+                      val dest = File(trashDir, f.name)
+                      if (f.renameTo(dest)) count++
+                  }
+                  Toast.makeText(this, "$count video Trash me bheji", Toast.LENGTH_SHORT).show()
+                  loadVideos()
+              }
+
+              private fun exportSelected() {
+                  if (selected.isEmpty()) return
+                  var count = 0
+                  for (f in selected) {
+                      if (exportToPublic(f)) count++
+                  }
+                  Toast.makeText(this, "$count video Gallery me export hui", Toast.LENGTH_LONG).show()
+                  exitSelectionMode()
+              }
+
+              private fun exportToPublic(file: File): Boolean {
+                  return try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                          val values = ContentValues().apply {
+                              put(MediaStore.Video.Media.DISPLAY_NAME, file.name)
+                              put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                              put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/BackgroundCamera")
+                          }
+                          val uri = contentResolver.insert(
+                              MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values
+                          ) ?: return false
+                          contentResolver.openOutputStream(uri)?.use { out ->
+                              file.inputStream().use { it.copyTo(out) }
+                          }
+                          true
+                      } else {
+                          @Suppress("DEPRECATION")
+                          val dest = File(
+                              Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+                              "BackgroundCamera"
+                          ).apply { mkdirs() }
+                          val out = File(dest, file.name)
+                          file.copyTo(out, overwrite = true)
+                          true
+                      }
                   } catch (e: Exception) {
-                      Toast.makeText(this, "Koi video player nahi mila", Toast.LENGTH_SHORT).show()
+                      e.printStackTrace(); false
                   }
               }
 
-              private fun hasAllPermissions(): Boolean =
-                  requiredPermissions.all {
-                      ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-                  }
+              private fun hasAllPerms() = requiredPermissions.all {
+                  ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+              }
 
               private fun startRecordingService() {
-                  val intent = Intent(this, RecordingService::class.java).apply {
+                  val i = Intent(this, RecordingService::class.java).apply {
                       action = RecordingService.ACTION_START
                   }
-                  ContextCompat.startForegroundService(this, intent)
+                  ContextCompat.startForegroundService(this, i)
                   Toast.makeText(this, "Recording start ho gayi", Toast.LENGTH_SHORT).show()
               }
 
               private fun stopRecordingService() {
-                  val intent = Intent(this, RecordingService::class.java).apply {
+                  val i = Intent(this, RecordingService::class.java).apply {
                       action = RecordingService.ACTION_STOP
                   }
-                  startService(intent)
-                  Toast.makeText(this, "Recording band. Video save ho gayi.", Toast.LENGTH_SHORT).show()
+                  startService(i)
+                  Toast.makeText(this, "Recording band", Toast.LENGTH_SHORT).show()
                   videoListLayout.postDelayed({ loadVideos() }, 1500)
               }
           }
           EOF
 
+          # ---------------- TrashActivity ----------------
+          cat > app/src/main/java/com/example/backgroundcamera/TrashActivity.kt <<'EOF'
+          package com.example.backgroundcamera
+
+          import android.net.Uri
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.*
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.content.FileProvider
+          import java.io.File
+
+          class TrashActivity : AppCompatActivity() {
+
+              private lateinit var list: LinearLayout
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_trash)
+                  supportActionBar?.title = "Trash"
+                  list = findViewById(R.id.trashList)
+                  findViewById<Button>(R.id.btnEmptyAll).setOnClickListener { emptyAll() }
+              }
+
+              override fun onResume() {
+                  super.onResume(); load()
+              }
+
+              private fun trashDir(): File =
+                  File(getExternalFilesDir(null), "Trash").apply { mkdirs() }
+
+              private fun load() {
+                  list.removeAllViews()
+                  val files = trashDir().listFiles { f -> f.extension == "mp4" }
+                      ?.sortedByDescending { it.lastModified() }
+                  if (files.isNullOrEmpty()) {
+                      list.addView(TextView(this).apply {
+                          text = "Trash khali hai."
+                          gravity = Gravity.CENTER
+                          setPadding(0, 48, 0, 48)
+                      })
+                      return
+                  }
+                  for (f in files) list.addView(row(f))
+              }
+
+              private fun row(file: File): View {
+                  val row = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setPadding(16, 16, 16, 16)
+                  }
+                  val tv = TextView(this).apply {
+                      text = file.name
+                      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                  }
+                  val btnPlay = Button(this).apply {
+                      text = "Play"
+                      setOnClickListener { play(file) }
+                  }
+                  val btnRestore = Button(this).apply {
+                      text = "Restore"
+                      setOnClickListener { restore(file) }
+                  }
+                  val btnDel = Button(this).apply {
+                      text = "Delete"
+                      setOnClickListener { permanentDelete(file) }
+                  }
+                  row.addView(tv); row.addView(btnPlay); row.addView(btnRestore); row.addView(btnDel)
+                  return row
+              }
+
+              private fun play(file: File) {
+                  val uri: Uri = FileProvider.getUriForFile(
+                      this, "com.example.backgroundcamera.fileprovider", file
+                  )
+                  val i = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                      setDataAndType(uri, "video/mp4")
+                      addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  }
+                  try { startActivity(i) } catch (_: Exception) {}
+              }
+
+              private fun restore(file: File) {
+                  val movies = getExternalFilesDir(android.os.Environment.DIRECTORY_MOVIES) ?: return
+                  movies.mkdirs()
+                  val dest = File(movies, file.name)
+                  if (file.renameTo(dest)) {
+                      Toast.makeText(this, "Restore ho gayi", Toast.LENGTH_SHORT).show()
+                      load()
+                  } else Toast.makeText(this, "Restore fail", Toast.LENGTH_SHORT).show()
+              }
+
+              private fun permanentDelete(file: File) {
+                  if (file.delete()) {
+                      Toast.makeText(this, "Permanently delete", Toast.LENGTH_SHORT).show()
+                      load()
+                  }
+              }
+
+              private fun emptyAll() {
+                  trashDir().listFiles()?.forEach { it.delete() }
+                  Toast.makeText(this, "Trash khali kar di", Toast.LENGTH_SHORT).show()
+                  load()
+              }
+          }
+          EOF
+
+          # ---------------- SettingsActivity (Notification customization) ----------------
+          cat > app/src/main/java/com/example/backgroundcamera/SettingsActivity.kt <<'EOF'
+          package com.example.backgroundcamera
+
+          import android.content.SharedPreferences
+          import android.os.Bundle
+          import android.widget.*
+          import androidx.appcompat.app.AppCompatActivity
+
+          class SettingsActivity : AppCompatActivity() {
+
+              private lateinit var prefs: SharedPreferences
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_settings)
+                  supportActionBar?.title = "Notification Settings"
+                  prefs = getSharedPreferences("notif_prefs", MODE_PRIVATE)
+
+                  val etTitle = findViewById<EditText>(R.id.etTitle)
+                  val etText = findViewById<EditText>(R.id.etText)
+                  val spinnerIcon = findViewById<Spinner>(R.id.spinnerIcon)
+                  val spinnerImportance = findViewById<Spinner>(R.id.spinnerImportance)
+                  val btnSave = findViewById<Button>(R.id.btnSave)
+
+                  val icons = listOf("App Logo", "Camera", "Video", "Dot")
+                  spinnerIcon.adapter = ArrayAdapter(
+                      this, android.R.layout.simple_spinner_dropdown_item, icons
+                  )
+                  val importance = listOf("Hidden (Min)", "Silent (Low)", "Normal")
+                  spinnerImportance.adapter = ArrayAdapter(
+                      this, android.R.layout.simple_spinner_dropdown_item, importance
+                  )
+
+                  etTitle.setText(prefs.getString("title", "Recording"))
+                  etText.setText(prefs.getString("text", "Running"))
+                  spinnerIcon.setSelection(prefs.getInt("icon", 0))
+                  spinnerImportance.setSelection(prefs.getInt("importance", 0))
+
+                  btnSave.setOnClickListener {
+                      prefs.edit()
+                          .putString("title", etTitle.text.toString().ifBlank { "Recording" })
+                          .putString("text", etText.text.toString().ifBlank { "Running" })
+                          .putInt("icon", spinnerIcon.selectedItemPosition)
+                          .putInt("importance", spinnerImportance.selectedItemPosition)
+                          .apply()
+                      Toast.makeText(this, "Save ho gaya. Agli recording se lagega.", Toast.LENGTH_LONG).show()
+                      finish()
+                  }
+              }
+          }
+          EOF
+
+          # ---------------- RecordingService ----------------
           cat > app/src/main/java/com/example/backgroundcamera/RecordingService.kt <<'EOF'
           package com.example.backgroundcamera
 
@@ -300,6 +624,7 @@ jobs:
           import android.app.NotificationChannel
           import android.app.NotificationManager
           import android.content.Intent
+          import android.content.SharedPreferences
           import android.content.pm.ServiceInfo
           import android.os.Build
           import android.os.Environment
@@ -335,14 +660,15 @@ jobs:
               private var videoCapture: VideoCapture<Recorder>? = null
               private var activeRecording: Recording? = null
               private lateinit var wakeLock: PowerManager.WakeLock
+              private lateinit var prefs: SharedPreferences
 
               override fun onCreate() {
                   super.onCreate()
+                  prefs = getSharedPreferences("notif_prefs", MODE_PRIVATE)
                   createNotificationChannel()
                   val pm = getSystemService(POWER_SERVICE) as PowerManager
                   wakeLock = pm.newWakeLock(
-                      PowerManager.PARTIAL_WAKE_LOCK,
-                      "BackgroundCamera::WakeLock"
+                      PowerManager.PARTIAL_WAKE_LOCK, "BackgroundCamera::WakeLock"
                   ).apply { setReferenceCounted(false) }
               }
 
@@ -356,18 +682,14 @@ jobs:
               }
 
               private fun startRecording() {
-                  val notification = buildNotification()
+                  val n = buildNotification()
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                       startForeground(
-                          NOTIFICATION_ID,
-                          notification,
+                          NOTIFICATION_ID, n,
                           ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
                                   ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                       )
-                  } else {
-                      startForeground(NOTIFICATION_ID, notification)
-                  }
-
+                  } else startForeground(NOTIFICATION_ID, n)
                   if (!wakeLock.isHeld) wakeLock.acquire()
                   initCameraAndRecord()
               }
@@ -383,9 +705,7 @@ jobs:
                           videoCapture = VideoCapture.withOutput(recorder)
                           cameraProvider?.unbindAll()
                           cameraProvider?.bindToLifecycle(
-                              this,
-                              CameraSelector.DEFAULT_BACK_CAMERA,
-                              videoCapture
+                              this, CameraSelector.DEFAULT_BACK_CAMERA, videoCapture
                           )
                           beginVideoFileRecording()
                       } catch (e: Exception) {
@@ -397,22 +717,22 @@ jobs:
 
               private fun beginVideoFileRecording() {
                   val capture = videoCapture ?: return
-                  val videoDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-                  if (videoDir != null && !videoDir.exists()) videoDir.mkdirs()
-                  val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+                  val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+                  if (dir != null && !dir.exists()) dir.mkdirs()
+                  val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
                       .format(System.currentTimeMillis())
-                  val videoFile = File(videoDir, "REC_${timeStamp}.mp4")
-                  val outputOptions = FileOutputOptions.Builder(videoFile).build()
+                  val file = File(dir, "REC_$ts.mp4")
+                  val opts = FileOutputOptions.Builder(file).build()
 
                   activeRecording = capture.output
-                      .prepareRecording(this, outputOptions)
+                      .prepareRecording(this, opts)
                       .withAudioEnabled()
-                      .start(ContextCompat.getMainExecutor(this)) { event ->
-                          when (event) {
-                              is VideoRecordEvent.Start -> Log.d(TAG, "Recording started")
+                      .start(ContextCompat.getMainExecutor(this)) { ev ->
+                          when (ev) {
+                              is VideoRecordEvent.Start -> Log.d(TAG, "Started")
                               is VideoRecordEvent.Finalize -> {
-                                  if (event.hasError()) Log.e(TAG, "Error: ${event.error}")
-                                  else Log.d(TAG, "Saved: ${event.outputResults.outputUri}")
+                                  if (ev.hasError()) Log.e(TAG, "Err: ${ev.error}")
+                                  else Log.d(TAG, "Saved: ${ev.outputResults.outputUri}")
                                   activeRecording = null
                               }
                           }
@@ -422,8 +742,7 @@ jobs:
               private fun stopRecordingAndService() {
                   try { activeRecording?.stop() } catch (_: Exception) {}
                   activeRecording = null
-                  cameraProvider?.unbindAll()
-                  cameraProvider = null
+                  cameraProvider?.unbindAll(); cameraProvider = null
                   if (wakeLock.isHeld) wakeLock.release()
                   stopForeground(STOP_FOREGROUND_REMOVE)
                   stopSelf()
@@ -438,27 +757,37 @@ jobs:
 
               private fun createNotificationChannel() {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      val channel = NotificationChannel(
-                          CHANNEL_ID,
-                          "Recording",
-                          NotificationManager.IMPORTANCE_MIN
-                      ).apply {
+                      val imp = when (prefs.getInt("importance", 0)) {
+                          0 -> NotificationManager.IMPORTANCE_MIN
+                          1 -> NotificationManager.IMPORTANCE_LOW
+                          else -> NotificationManager.IMPORTANCE_DEFAULT
+                      }
+                      val ch = NotificationChannel(CHANNEL_ID, "Recording", imp).apply {
                           setShowBadge(false)
                           enableLights(false)
-                          enableVibration(false)
-                          setSound(null, null)
+                          enableVibration(imp >= NotificationManager.IMPORTANCE_DEFAULT)
+                          if (imp < NotificationManager.IMPORTANCE_DEFAULT) setSound(null, null)
                           lockscreenVisibility = Notification.VISIBILITY_SECRET
                       }
-                      val manager = getSystemService(NotificationManager::class.java)
-                      manager.createNotificationChannel(channel)
+                      getSystemService(NotificationManager::class.java)
+                          .createNotificationChannel(ch)
                   }
               }
 
+              private fun iconRes(): Int = when (prefs.getInt("icon", 0)) {
+                  0 -> R.drawable.ic_notification_logo
+                  1 -> R.drawable.ic_notification_camera
+                  2 -> R.drawable.ic_notification_video
+                  else -> R.drawable.ic_notification_dot
+              }
+
               private fun buildNotification(): Notification {
+                  val title = prefs.getString("title", "Recording") ?: "Recording"
+                  val text = prefs.getString("text", "Running") ?: "Running"
                   return NotificationCompat.Builder(this, CHANNEL_ID)
-                      .setContentTitle("Recording")
-                      .setContentText("Running")
-                      .setSmallIcon(android.R.drawable.ic_menu_camera)
+                      .setContentTitle(title)
+                      .setContentText(text)
+                      .setSmallIcon(iconRes())
                       .setPriority(NotificationCompat.PRIORITY_MIN)
                       .setSilent(true)
                       .setShowWhen(false)
@@ -470,60 +799,129 @@ jobs:
           }
           EOF
 
+          # ---------------- Layouts ----------------
           cat > app/src/main/res/layout/activity_main.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
               android:layout_width="match_parent"
               android:layout_height="match_parent"
               android:orientation="vertical"
-              android:padding="16dp">
+              android:padding="12dp">
 
-              <Button
-                  android:id="@+id/btnStart"
+              <LinearLayout
+                  android:id="@+id/topBar"
                   android:layout_width="match_parent"
                   android:layout_height="wrap_content"
-                  android:text="START RECORDING" />
+                  android:orientation="horizontal"
+                  android:background="#22000000"
+                  android:padding="8dp"
+                  android:visibility="gone">
 
-              <Button
-                  android:id="@+id/btnStop"
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="8dp"
+                  <TextView
+                      android:id="@+id/tvSelectedCount"
+                      android:layout_width="0dp"
+                      android:layout_height="wrap_content"
+                      android:layout_weight="1"
+                      android:text="0 selected"
+                      android:textStyle="bold"
+                      android:gravity="center_vertical" />
+
+                  <Button android:id="@+id/btnExport" android:layout_width="wrap_content"
+                      android:layout_height="wrap_content" android:text="Export" />
+                  <Button android:id="@+id/btnDelete" android:layout_width="wrap_content"
+                      android:layout_height="wrap_content" android:text="Delete" />
+                  <Button android:id="@+id/btnCancel" android:layout_width="wrap_content"
+                      android:layout_height="wrap_content" android:text="Cancel" />
+              </LinearLayout>
+
+              <Button android:id="@+id/btnStart" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:text="START RECORDING" />
+              <Button android:id="@+id/btnStop" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:layout_marginTop="6dp"
                   android:text="STOP RECORDING" />
 
-              <TextView
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="24dp"
-                  android:text="Recorded Videos:"
-                  android:textStyle="bold"
-                  android:textSize="18sp" />
+              <LinearLayout android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:orientation="horizontal"
+                  android:layout_marginTop="6dp">
+                  <Button android:id="@+id/btnTrash" android:layout_width="0dp"
+                      android:layout_height="wrap_content" android:layout_weight="1"
+                      android:text="Trash" />
+                  <Button android:id="@+id/btnSettings" android:layout_width="0dp"
+                      android:layout_height="wrap_content" android:layout_weight="1"
+                      android:layout_marginStart="6dp" android:text="Notification Settings" />
+              </LinearLayout>
 
-              <ScrollView
-                  android:layout_width="match_parent"
-                  android:layout_height="0dp"
-                  android:layout_weight="1"
-                  android:layout_marginTop="8dp">
+              <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:layout_marginTop="12dp" android:text="Recorded Videos (long press to select):"
+                  android:textStyle="bold" />
 
-                  <LinearLayout
-                      android:id="@+id/videoListLayout"
-                      android:layout_width="match_parent"
-                      android:layout_height="wrap_content"
+              <ScrollView android:layout_width="match_parent" android:layout_height="0dp"
+                  android:layout_weight="1" android:layout_marginTop="6dp">
+                  <LinearLayout android:id="@+id/videoListLayout"
+                      android:layout_width="match_parent" android:layout_height="wrap_content"
                       android:orientation="vertical" />
               </ScrollView>
           </LinearLayout>
           EOF
 
+          cat > app/src/main/res/layout/activity_trash.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent" android:layout_height="match_parent"
+              android:orientation="vertical" android:padding="12dp">
+
+              <Button android:id="@+id/btnEmptyAll"
+                  android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:text="Empty Trash (Permanent Delete All)" />
+
+              <ScrollView android:layout_width="match_parent" android:layout_height="0dp"
+                  android:layout_weight="1" android:layout_marginTop="8dp">
+                  <LinearLayout android:id="@+id/trashList"
+                      android:layout_width="match_parent" android:layout_height="wrap_content"
+                      android:orientation="vertical" />
+              </ScrollView>
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/res/layout/activity_settings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent" android:layout_height="match_parent"
+              android:orientation="vertical" android:padding="16dp">
+
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:text="Notification Title" android:textStyle="bold" />
+              <EditText android:id="@+id/etTitle" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:hint="Recording" />
+
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:layout_marginTop="12dp" android:text="Notification Text" android:textStyle="bold" />
+              <EditText android:id="@+id/etText" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:hint="Running" />
+
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:layout_marginTop="12dp" android:text="Notification Icon" android:textStyle="bold" />
+              <Spinner android:id="@+id/spinnerIcon" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" />
+
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:layout_marginTop="12dp" android:text="Importance" android:textStyle="bold" />
+              <Spinner android:id="@+id/spinnerImportance" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" />
+
+              <Button android:id="@+id/btnSave" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:layout_marginTop="24dp"
+                  android:text="Save Settings" />
+          </LinearLayout>
+          EOF
+
+          # ---------------- Values ----------------
           cat > app/src/main/res/values/strings.xml <<'EOF'
-          <resources>
-              <string name="app_name">Background Camera</string>
-          </resources>
+          <resources><string name="app_name">Background Camera</string></resources>
           EOF
 
           cat > app/src/main/res/values/colors.xml <<'EOF'
-          <resources>
-              <color name="ic_launcher_background">#FF5722</color>
-          </resources>
+          <resources><color name="ic_launcher_background">#FF5722</color></resources>
           EOF
 
           cat > app/src/main/res/values/themes.xml <<'EOF'
@@ -536,6 +934,7 @@ jobs:
           </resources>
           EOF
 
+          # ---------------- Icons ----------------
           cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'EOF'
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp" android:height="108dp"
@@ -545,6 +944,42 @@ jobs:
                   <path android:fillColor="#FFFFFF"
                       android:pathData="M9,2L7.17,4H4a2,2 0 0,0 -2,2v12a2,2 0 0,0 2,2h16a2,2 0 0,0 2,-2V6a2,2 0 0,0 -2,-2h-3.17L15,2H9zM12,17a5,5 0 1,1 0,-10a5,5 0 0,1 0,10z" />
               </group>
+          </vector>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_notification_logo.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFF"
+                  android:pathData="M9,2L7.17,4H4a2,2 0 0,0 -2,2v12a2,2 0 0,0 2,2h16a2,2 0 0,0 2,-2V6a2,2 0 0,0 -2,-2h-3.17L15,2H9zM12,17a5,5 0 1,1 0,-10a5,5 0 0,1 0,10z" />
+          </vector>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_notification_camera.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFF"
+                  android:pathData="M20,5h-3.17L15,3H9L7.17,5H4c-1.1,0 -2,0.9 -2,2v12c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V7c0,-1.1 -0.9,-2 -2,-2zM12,18c-2.76,0 -5,-2.24 -5,-5s2.24,-5 5,-5 5,2.24 5,5 -2.24,5 -5,5z" />
+          </vector>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_notification_video.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFF"
+                  android:pathData="M17,10.5V7c0,-0.55 -0.45,-1 -1,-1H4c-0.55,0 -1,0.45 -1,1v10c0,0.55 0.45,1 1,1h12c0.55,0 1,-0.45 1,-1v-3.5l4,4v-11l-4,4z" />
+          </vector>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_notification_dot.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFF"
+                  android:pathData="M12,12m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0" />
           </vector>
           EOF
 
