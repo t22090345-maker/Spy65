@@ -67,6 +67,7 @@ jobs:
           mkdir -p app/src/main/res/drawable
           mkdir -p app/src/main/res/mipmap-anydpi-v26
           mkdir -p app/src/main/res/mipmap
+          mkdir -p app/src/main/res/xml
 
           cat > app/build.gradle <<'EOF'
           plugins {
@@ -144,8 +145,25 @@ jobs:
                       android:enabled="true"
                       android:exported="false"
                       android:foregroundServiceType="camera|microphone" />
+
+                  <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="com.example.backgroundcamera.fileprovider"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data
+                          android:name="android.support.FILE_PROVIDER_PATHS"
+                          android:resource="@xml/file_paths" />
+                  </provider>
               </application>
           </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/file_paths.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths xmlns:android="http://schemas.android.com/apk/res/android">
+              <external-files-path name="movies" path="Movies/" />
+          </paths>
           EOF
 
           cat > app/src/main/java/com/example/backgroundcamera/MainActivity.kt <<'EOF'
@@ -154,18 +172,26 @@ jobs:
           import android.Manifest
           import android.content.Intent
           import android.content.pm.PackageManager
+          import android.net.Uri
           import android.os.Build
           import android.os.Bundle
+          import android.os.Environment
+          import android.view.Gravity
           import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
           import android.widget.Toast
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.appcompat.app.AppCompatActivity
           import androidx.core.content.ContextCompat
+          import androidx.core.content.FileProvider
+          import java.io.File
 
           class MainActivity : AppCompatActivity() {
 
               private lateinit var btnStart: Button
               private lateinit var btnStop: Button
+              private lateinit var videoListLayout: LinearLayout
 
               private val requiredPermissions = mutableListOf(
                   Manifest.permission.CAMERA,
@@ -189,6 +215,7 @@ jobs:
 
                   btnStart = findViewById(R.id.btnStart)
                   btnStop = findViewById(R.id.btnStop)
+                  videoListLayout = findViewById(R.id.videoListLayout)
 
                   btnStart.setOnClickListener {
                       if (hasAllPermissions()) startRecordingService()
@@ -196,6 +223,50 @@ jobs:
                   }
 
                   btnStop.setOnClickListener { stopRecordingService() }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  loadVideos()
+              }
+
+              private fun loadVideos() {
+                  val videoDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+                  val files = videoDir?.listFiles { file -> file.extension == "mp4" }
+                  
+                  videoListLayout.removeAllViews()
+                  
+                  if (files != null && files.isNotEmpty()) {
+                      for (file in files) {
+                          val button = Button(this)
+                          button.text = file.name
+                          button.setOnClickListener { playVideo(file) }
+                          videoListLayout.addView(button)
+                      }
+                  } else {
+                      val textView = TextView(this)
+                      textView.text = "Abhi tak koi video record nahi hui."
+                      textView.gravity = Gravity.CENTER
+                      textView.setPadding(0, 32, 0, 32)
+                      videoListLayout.addView(textView)
+                  }
+              }
+
+              private fun playVideo(file: File) {
+                  val uri: Uri = FileProvider.getUriForFile(
+                      this,
+                      "com.example.backgroundcamera.fileprovider",
+                      file
+                  )
+                  val intent = Intent(Intent.ACTION_VIEW).apply {
+                      setDataAndType(uri, "video/mp4")
+                      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                  }
+                  try {
+                      startActivity(intent)
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "Koi video player nahi mila", Toast.LENGTH_SHORT).show()
+                  }
               }
 
               private fun hasAllPermissions(): Boolean =
@@ -217,6 +288,8 @@ jobs:
                   }
                   startService(intent)
                   Toast.makeText(this, "Recording band. Video save ho gayi.", Toast.LENGTH_SHORT).show()
+                  // List update karne ke liye thoda wait karke refresh karo
+                  videoListLayout.postDelayed({ loadVideos() }, 1500)
               }
           }
           EOF
@@ -403,21 +476,41 @@ jobs:
               android:layout_width="match_parent"
               android:layout_height="match_parent"
               android:orientation="vertical"
-              android:gravity="center"
-              android:padding="24dp">
+              android:padding="16dp">
 
               <Button
                   android:id="@+id/btnStart"
                   android:layout_width="match_parent"
                   android:layout_height="wrap_content"
-                  android:text="Start Recording" />
+                  android:text="START RECORDING" />
 
               <Button
                   android:id="@+id/btnStop"
                   android:layout_width="match_parent"
                   android:layout_height="wrap_content"
-                  android:layout_marginTop="16dp"
-                  android:text="Stop Recording" />
+                  android:layout_marginTop="8dp"
+                  android:text="STOP RECORDING" />
+
+              <TextView
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="24dp"
+                  android:text="Recorded Videos:"
+                  android:textStyle="bold"
+                  android:textSize="18sp" />
+
+              <ScrollView
+                  android:layout_width="match_parent"
+                  android:layout_height="0dp"
+                  android:layout_weight="1"
+                  android:layout_marginTop="8dp">
+
+                  <LinearLayout
+                      android:id="@+id/videoListLayout"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:orientation="vertical" />
+              </ScrollView>
           </LinearLayout>
           EOF
 
