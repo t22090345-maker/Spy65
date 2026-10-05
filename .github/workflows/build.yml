@@ -160,6 +160,7 @@ jobs:
           </paths>
           EOF
 
+          # ---------------- MainActivity (Stock label + date/time per row) ----------------
           cat > app/src/main/java/com/example/backgroundcamera/MainActivity.kt <<'EOF'
           package com.example.backgroundcamera
 
@@ -167,6 +168,7 @@ jobs:
           import android.content.ContentValues
           import android.content.Intent
           import android.content.pm.PackageManager
+          import android.graphics.Color
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
@@ -275,12 +277,13 @@ jobs:
               private fun makeVideoRow(file: File): View {
                   val row = LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL
-                      setPadding(16, 16, 16, 16)
+                      setPadding(16, 20, 16, 20)
                       layoutParams = LinearLayout.LayoutParams(
                           LinearLayout.LayoutParams.MATCH_PARENT,
                           LinearLayout.LayoutParams.WRAP_CONTENT
                       )
                   }
+
                   val cb = CheckBox(this).apply {
                       visibility = if (selectionMode) View.VISIBLE else View.GONE
                       isChecked = selected.contains(file)
@@ -289,14 +292,35 @@ jobs:
                           updateTopBar()
                       }
                   }
-                  val tv = TextView(this).apply {
-                      text = prettyName(file)
-                      textSize = 15f
-                      setPadding(24, 8, 8, 8)
-                      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+
+                  // Vertical layout: "Stock" on top, date/time below
+                  val textCol = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(24, 0, 8, 0)
+                      layoutParams = LinearLayout.LayoutParams(
+                          0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+                      )
                   }
+
+                  val tvStock = TextView(this).apply {
+                      text = "Stock"
+                      textSize = 17f
+                      setTypeface(typeface, android.graphics.Typeface.BOLD)
+                  }
+
+                  val tvDateTime = TextView(this).apply {
+                      text = prettyName(file)
+                      textSize = 14f
+                      setTextColor(Color.parseColor("#888888"))
+                      setPadding(0, 4, 0, 0)
+                  }
+
+                  textCol.addView(tvStock)
+                  textCol.addView(tvDateTime)
+
                   row.addView(cb)
-                  row.addView(tv)
+                  row.addView(textCol)
+
                   row.setOnClickListener {
                       if (selectionMode) cb.isChecked = !cb.isChecked
                       else playVideo(file)
@@ -839,7 +863,7 @@ jobs:
               </LinearLayout>
 
               <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                  android:layout_marginTop="12dp" android:text="Recorded Videos (long press to select):"
+                  android:layout_marginTop="12dp" android:text="Recordings (long press to select):"
                   android:textStyle="bold" />
 
               <ScrollView android:layout_width="match_parent" android:layout_height="0dp"
@@ -902,8 +926,9 @@ jobs:
           </LinearLayout>
           EOF
 
+          # ---------- APP NAME = "artex" ----------
           cat > app/src/main/res/values/strings.xml <<'EOF'
-          <resources><string name="app_name">Video Recorder</string></resources>
+          <resources><string name="app_name">artex</string></resources>
           EOF
 
           cat > app/src/main/res/values/colors.xml <<'EOF'
@@ -922,28 +947,21 @@ jobs:
           </resources>
           EOF
 
-          # ---------- Launcher icon: 4 dots (orange, blue, red, green) on transparent background ----------
           cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'EOF'
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp" android:height="108dp"
               android:viewportWidth="108" android:viewportHeight="108">
-
-              <!-- Orange dot -->
               <path android:fillColor="#FF9800"
                   android:pathData="M26,44 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0" />
-              <!-- Blue dot -->
               <path android:fillColor="#2196F3"
                   android:pathData="M44,44 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0" />
-              <!-- Red dot -->
               <path android:fillColor="#F44336"
                   android:pathData="M62,44 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0" />
-              <!-- Green dot -->
               <path android:fillColor="#4CAF50"
                   android:pathData="M80,44 a7,7 0 1,0 14,0 a7,7 0 1,0 -14,0" />
           </vector>
           EOF
 
-          # ---------- Notification "App Logo" icon (white monochrome 4 dots) ----------
           cat > app/src/main/res/drawable/ic_notification_logo.xml <<'EOF'
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="24dp" android:height="24dp"
@@ -959,7 +977,6 @@ jobs:
           </vector>
           EOF
 
-          # ---------- Other notification icons ----------
           cat > app/src/main/res/drawable/ic_notification_camera.xml <<'EOF'
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="24dp" android:height="24dp"
@@ -987,7 +1004,6 @@ jobs:
           </vector>
           EOF
 
-          # ---------- Adaptive launcher icons with TRANSPARENT background ----------
           cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
@@ -1004,7 +1020,6 @@ jobs:
           </adaptive-icon>
           EOF
 
-          # ---------- Fallback icons (Android 7 and below) - transparent vector ----------
           cat > app/src/main/res/mipmap/ic_launcher.xml <<'EOF'
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp" android:height="108dp"
@@ -1043,6 +1058,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: VideoRecorder-APK
+          name: artex-APK
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
